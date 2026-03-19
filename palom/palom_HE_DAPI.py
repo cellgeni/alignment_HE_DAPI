@@ -408,10 +408,4 @@ def main(csv_table_path, out_folder, level = 0, thumbnail = 5, save_random_crops
 if __name__ == "__main__":
     fire.Fire(main)  
 
-
-
-
-    
-if __name__ == "__main__":
-    fire.Fire(main)    
     
