@@ -98,7 +98,27 @@ def read_ome_tif_as_yxc(path):
 
     return da.from_array(img_yxc), metadata_dict
 
+def save_palom_transform(c21l, out_folder, name, level, thumbnail):
+    os.makedirs(out_folder, exist_ok=True)
 
+    mxs = c21l.block_affine_matrices_da
+    if hasattr(mxs, "compute"):
+        mxs = mxs.compute()
+
+    out_path = os.path.join(out_folder, f"{name}_palom_transform.npz")
+
+    np.savez_compressed(
+        out_path,
+        block_affine_matrices=mxs,
+        level=level,
+        thumbnail=thumbnail,
+        scale=2 ** level,
+        ref_shape=np.array(c21l.ref_img.shape),
+        moving_shape=np.array(c21l.moving_img.shape),
+    )
+
+    print(f"Saved PALOM transform → {out_path}")
+    return out_path
 
 
 def GetImages(HE_image_path, DAPI_image_path, level, thumbnail):
@@ -250,17 +270,28 @@ def save_registered_images(
                 description=metadata["OME"] if (with_metadata and metadata) else None
             )
 
-    print(f"Saving reference image → {ref_out}")
-    _save_tiff(ref_img, ref_out, with_metadata=True)
+    #print(f"Saving reference image → {ref_out}")
+    #_save_tiff(ref_img, ref_out, with_metadata=True)
 
-    print(f"Saving moving image → {moving_out}")
-    _save_tiff(moving_img, moving_out, with_metadata=False)
+    #print(f"Saving moving image → {moving_out}")
+    #_save_tiff(moving_img, moving_out, with_metadata=False)
 
-    print(f"✅ Saved registered images: {ref_out} and {moving_out}")
+    #print(f"✅ Saved registered images: {ref_out} and {moving_out}")
 
 
-def RegisterOneImage(HE_image_path, DAPI_image_path, out_folder, name, level=0, thumbnail=5, save_random_crops = False, N_crops = 10):
+def RegisterOneImage(
+    HE_image_path,
+    DAPI_image_path,
+    out_folder,
+    name,
+    level=0,
+    thumbnail=5,
+    save_random_crops=False,
+    N_crops=10,
+    registration_direction="DAPI_ref_HE_moving",
+):
     print('reading images')
+    name = name.replace("/", "_")
     img1, img2, img1_thumbnail, img2_thumbnail, c1r, c2r, ref_meta = GetImages(HE_image_path, DAPI_image_path, level, thumbnail)
     
     if len(img1.shape)>2:
@@ -283,25 +314,65 @@ def RegisterOneImage(HE_image_path, DAPI_image_path, out_folder, name, level=0, 
     print(img2_thumbnail.shape)
     print(img2_thumbnail.dtype)
     '''
-    c21l = palom.align.Aligner(ref_img=img1_p, moving_img=img2, ref_thumbnail=img1_thumbnail_p, moving_thumbnail=img2_thumbnail,
-                               ref_thumbnail_down_factor=2**thumbnail/2**level,
-                               moving_thumbnail_down_factor=2**thumbnail/2**level)
+    if registration_direction == "DAPI_ref_HE_moving":
+        ref_for_reg = img1_p
+        moving_for_reg = img2
+        ref_thumb_for_reg = img1_thumbnail_p
+        moving_thumb_for_reg = img2_thumbnail
+
+        ref_full_for_save = img1
+        moving_full_for_warp = c2r.pyramid[level] if c2r else img2
+
+    elif registration_direction == "HE_ref_DAPI_moving":
+        ref_for_reg = img2
+        moving_for_reg = img1_p
+        ref_thumb_for_reg = img2_thumbnail
+        moving_thumb_for_reg = img1_thumbnail_p
+
+        ref_full_for_save = img2
+        moving_full_for_warp = img1
+
+    else:
+        raise ValueError(
+            "registration_direction must be either "
+            "'DAPI_ref_HE_moving' or 'HE_ref_DAPI_moving'"
+        )
+
+    c21l = palom.align.Aligner(
+        ref_img=ref_for_reg,
+        moving_img=moving_for_reg,
+        ref_thumbnail=ref_thumb_for_reg,
+        moving_thumbnail=moving_thumb_for_reg,
+        ref_thumbnail_down_factor=2**thumbnail/2**level,
+        moving_thumbnail_down_factor=2**thumbnail/2**level,
+    )
     c21l.coarse_register_affine(n_keypoints=4000)
     gc.collect()
     print('palom registration')
+    c21l.block_size = 4096 ## hardcoded values for faster registration - using large blocks
+    c21l.block_step = 2048 ## it should be ok if local warping is not very big
     c21l.compute_shifts()
     c21l.constrain_shifts()
+    ## save transformation matrices
+    transform_path = save_palom_transform(
+        c21l=c21l,
+        out_folder=out_folder,
+        name=name,
+        level=level,
+        thumbnail=thumbnail,
+    )
+
     if c2r:
         moving_img = c2r.pyramid[level]
         if not isinstance(moving_img, da.Array):
-            moving_img = da.from_array(moving_img, chunks=(1024, 1024))
+            moving_full_for_warp = da.from_array(moving_full_for_warp, chunks=(1024, 1024))
         #print("img1:", img1.shape, img1.dtype, isinstance(img1, da.Array))
         #print("moving_img:", moving_img.shape, moving_img.dtype, isinstance(moving_img, da.Array))
         #print("Matrices:", c21l.block_affine_matrices_da.shape)
         c2m = palom.align.block_affine_transformed_moving_img(
-            ref_img=img1[:,:,0],
-            moving_img=moving_img,
-            mxs=c21l.block_affine_matrices_da
+            ref_img=ref_for_reg,
+            moving_img=moving_full_for_warp,
+            mxs=c21l.block_affine_matrices_da,
         )
     else:
         if not isinstance(img2, da.Array):
@@ -345,12 +416,12 @@ def RegisterOneImage(HE_image_path, DAPI_image_path, out_folder, name, level=0, 
     '''
     # Save both images separately
     save_registered_images(
-        ref_img=img1,
+        ref_img=ref_full_for_save,
         moving_img=c2m,
         out_folder=out_folder,
         sample_name=name,
-        metadata=ref_meta,        # OME metadata (e.g. from read_ome_tif_as_yxc)
-        use_pyramids=True
+        metadata=ref_meta,
+        use_pyramids=True,
     )
 
     
@@ -390,7 +461,15 @@ def save_random_N_crops(img_da_1ch, img_da_3ch, out_folder, sample_name, N, crop
         img_path = os.path.join(out_folder, f"{sample_name}_crop_img_{i}.png")
         tifffile.imwrite(img_path, crop_img, photometric='rgb')
 
-def main(csv_table_path, out_folder, level = 0, thumbnail = 5, save_random_crops = True, N_crops = 10):
+def main(
+        csv_table_path,
+        out_folder,
+        level=0,
+        thumbnail=5,
+        save_random_crops=True,
+        N_crops=10,
+        registration_direction="DAPI_ref_HE_moving",
+    ):
     #csv file should have next columns: Name, HE_image_path, DAPI_image_path
     # at the moment I consider only one channel image for DAPI! (in future I want to consider N channels)
     table = pd.read_csv(csv_table_path)
@@ -398,7 +477,7 @@ def main(csv_table_path, out_folder, level = 0, thumbnail = 5, save_random_crops
         print(table['Name'][i])
         
         try:
-            RegisterOneImage(table['HE_image_path'][i], table['DAPI_image_path'][i], out_folder, table['Name'][i], level, thumbnail, save_random_crops, N_crops)
+            RegisterOneImage(table['HE_image_path'][i], table['DAPI_image_path'][i], out_folder, table['Name'][i], level, thumbnail, save_random_crops, N_crops, registration_direction)
         except Exception as error:
             print(f"❌ Error while processing {table['Name'][i]}:")
             traceback.print_exc()  # <---- FULL traceback
