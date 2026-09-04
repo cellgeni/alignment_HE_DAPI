@@ -270,13 +270,13 @@ def save_registered_images(
                 description=metadata["OME"] if (with_metadata and metadata) else None
             )
 
-    #print(f"Saving reference image → {ref_out}")
-    #_save_tiff(ref_img, ref_out, with_metadata=True)
+    print(f"Saving reference image → {ref_out}")
+    _save_tiff(ref_img, ref_out, with_metadata=True)
 
-    #print(f"Saving moving image → {moving_out}")
-    #_save_tiff(moving_img, moving_out, with_metadata=False)
+    print(f"Saving moving image → {moving_out}")
+    _save_tiff(moving_img, moving_out, with_metadata=False)
 
-    #print(f"✅ Saved registered images: {ref_out} and {moving_out}")
+    print(f"✅ Saved registered images: {ref_out} and {moving_out}")
 
 
 def RegisterOneImage(
